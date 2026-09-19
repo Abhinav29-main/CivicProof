@@ -178,8 +178,26 @@ def api_create():
     if not img_path:
         return err("Could not store the photo")
 
+    gate = ai.gate_photo(img_path, title, description)
+    if not gate["accepted"]:
+        try:
+            os.remove(img_path)
+        except OSError:
+            pass
+        return jsonify({
+            "ok": False,
+            "error": "image_rejected",
+            "reason_code": gate["reason_code"],
+            "message": gate["message"] + " Please start again with a real photo of the issue.",
+            "restart": True,          # the wizard must reset to step 1 — nothing was saved
+            "restart_step": 1,
+            "source": gate.get("source"),
+            "relevance": gate["relevance"],
+            "authenticity": gate["authenticity"],
+        }), 422
+
     cands = photo_candidates()
-    analysis = ai.analyze_new_report(img_path, title, description, lat, lng, cands)
+    analysis = ai.analyze_new_report(img_path, title, description, lat, lng, cands, vision_result=gate.get("vision"))
     cls, dup, pri = analysis["classification"], analysis["duplicate"], analysis["priority"]
 
     is_dup = bool(dup.get("match")) and not dup.get("possible") and dup["match"].get("status") != "resolved"
@@ -240,7 +258,31 @@ def api_analyze():
     img_path = None
     if photo and photo.filename:
         img_path = save_upload(photo, sub="staging")
-    analysis = ai.analyze_new_report(img_path, title, description, lat, lng, photo_candidates())
+
+    # No photo -> nothing to triage. Previously this fell through to `gate.get(...)` below and
+    # raised NameError; the preview must never run without a gated image.
+    if not img_path:
+        return err("A photo of the issue is required before the AI can analyse it")
+
+    gate = ai.gate_photo(img_path, title, description)
+    if not gate["accepted"]:
+        try:
+            os.remove(img_path)
+        except OSError:
+            pass
+        return jsonify({
+            "ok": False,
+            "error": "image_rejected",
+            "reason_code": gate["reason_code"],
+            "message": gate["message"] + " Please start again with a real photo of the issue.",
+            "restart": True,          # the wizard must reset to step 1 — the upload was discarded
+            "restart_step": 1,
+            "source": gate.get("source"),
+            "relevance": gate["relevance"],
+            "authenticity": gate["authenticity"],
+        }), 422
+
+    analysis = ai.analyze_new_report(img_path, title, description, lat, lng, photo_candidates(), vision_result=gate.get("vision"))
     out = {"classification": analysis["classification"],
            "priority": analysis["priority"],
            "duplicate": {k: v for k, v in analysis["duplicate"].items() if k != "match"}}
